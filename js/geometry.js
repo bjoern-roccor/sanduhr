@@ -6,18 +6,21 @@
 // Der Sand wird "gravitationsrichtig" modelliert: Seine Oberfläche ist eine Ebene
 // senkrecht zur Schwerkraft. Das Glas ist um den Winkel phi gekippt, also zeigt die
 // Schwerkraft im Glas-Koordinatensystem in Richtung g = (sin phi, cos phi).
-// Aufrecht (phi = 0) kommen ein Trichter im oberen und ein Schüttkegel im unteren
+// Aufrecht (phi = 0) kommen eine Mulde im oberen und ein Schüttkegel im unteren
 // Kolben dazu; beide verschwinden, wenn die Sanduhr auf die Seite kippt.
+//
+// Erhalten wird die sichtbare Fläche der Sandsilhouette (nicht das 3D-Volumen). Nur so ändert
+// sich das Bild beim Nachrutschen nicht scheinbar durch zusätzlichen oder fehlenden Sand.
 
 export const R = 0.62; // maximaler Radius der Kolben
 export const NECK = 0.045; // Halsradius
 export const WALL = 0.016; // Glasstärke
-export const FILL = 0.46; // Sandmenge als Anteil des Kolbenvolumens
+export const FILL = 0.46; // Sandmenge als Anteil der Kolbenfläche
 export const REPOSE = Math.tan((34 * Math.PI) / 180); // Böschungswinkel
 
 const N = 480; // Stützstellen pro Kolben
 const EPS_PHI = 0.002;
-const FEATURE_FADE = 0.3; // Kippwinkel (rad), bei dem Trichter/Kegel verschwunden sind
+const FEATURE_FADE = 0.3; // Kippwinkel (rad), bei dem Mulde/Kegel verschwunden sind
 
 export function radius(y) {
   const t = Math.min(1, Math.abs(y));
@@ -27,6 +30,11 @@ export function radius(y) {
   }
   const u = (t - 0.5) / 0.5;
   return R * (1 - 0.42 * u ** 2.2);
+}
+
+/** Radius der Innenseite des Glases, so weit reicht der Sand */
+export function innerRadius(y) {
+  return Math.max(radius(y) - WALL, 0.012);
 }
 
 /** Umriss des Glases als Polygon; inset verkleinert ihn (Innenseite des Glases). */
@@ -44,50 +52,49 @@ export function outline(inset = 0, n = 200) {
 
 // Tabellen entlang der Entfernung t vom Hals (0) zum Kolbenende (1)
 const T = new Float64Array(N + 1);
-const RT = new Float64Array(N + 1);
-const CUM = new Float64Array(N + 1); // Volumen von t = 0 bis t
+const RT = new Float64Array(N + 1); // Innenradius
+const CUM = new Float64Array(N + 1); // Fläche von t = 0 bis t
 for (let i = 0; i <= N; i++) {
   T[i] = i / N;
-  RT[i] = radius(T[i]);
+  RT[i] = innerRadius(T[i]);
 }
 for (let i = 1; i <= N; i++) {
-  CUM[i] = CUM[i - 1] + (0.5 * Math.PI * (RT[i - 1] ** 2 + RT[i] ** 2)) / N;
+  CUM[i] = CUM[i - 1] + (RT[i - 1] + RT[i]) / N; // Breite 2·r, trapezförmig integriert
 }
 
-export const BULB_VOLUME = CUM[N];
-export const SAND_VOLUME = FILL * BULB_VOLUME;
+export const BULB_AREA = CUM[N];
+export const SAND_AREA = FILL * BULB_AREA;
 
 function cumAt(t) {
   if (t <= 0) return 0;
-  if (t >= 1) return BULB_VOLUME;
+  if (t >= 1) return BULB_AREA;
   const x = t * N;
   const i = Math.floor(x);
   return CUM[i] + (CUM[i + 1] - CUM[i]) * (x - i);
 }
 
-function segmentArea(r, d) {
-  // Fläche des Kreises (Radius r), die rechts der Sehne x = d liegt
-  if (d <= -r) return Math.PI * r * r;
-  if (d >= r) return 0;
-  return r * r * Math.acos(d / r) - d * Math.sqrt(r * r - d * d);
-}
-
 /**
- * Sandvolumen eines Kolbens unterhalb der Ebene v = L (v = Position · Schwerkraft).
+ * Sandfläche eines Kolbens unterhalb der Ebene v = L (v = Position · Schwerkraft).
  * sign: -1 oberer Kolben, +1 unterer Kolben.
  */
-export function planeVolume(sign, phi, L) {
+export function planeArea(sign, phi, L) {
   if (phi < EPS_PHI) {
     if (sign < 0) return cumAt(-L);
-    return BULB_VOLUME - cumAt(L);
+    return BULB_AREA - cumAt(L);
   }
   const sn = Math.sin(phi);
   const cs = Math.cos(phi);
-  let prev = segmentArea(RT[0], (L - 0) / sn);
+  // Für jede Höhe y: Länge der Sehne [-r, r], die auf der Sandseite der Ebene liegt
+  const chord = (i) => {
+    const r = RT[i];
+    const xmin = (L - sign * T[i] * cs) / sn;
+    if (xmin >= r) return 0;
+    return r - Math.max(xmin, -r);
+  };
+  let prev = chord(0);
   let sum = 0;
   for (let i = 1; i <= N; i++) {
-    const d = (L - sign * T[i] * cs) / sn;
-    const cur = segmentArea(RT[i], d);
+    const cur = chord(i);
     sum += 0.5 * (prev + cur);
     prev = cur;
   }
@@ -105,37 +112,37 @@ function vRange(sign, sn, cs) {
   return [lo, hi];
 }
 
-function solveBulb(sign, V, phi, progress, craterVol) {
-  if (V < 1e-5) return null;
+function solveBulb(sign, A, phi, progress, craterArea) {
+  if (A < 1e-5) return null;
   const sn = Math.sin(phi);
   const cs = Math.max(Math.cos(phi), 1e-3);
   const k = Math.max(0, 1 - phi / FEATURE_FADE); // 1 aufrecht … 0 gekippt
   // Ohne Vorgabe fließt alles Abgeflossene in die Mulde
-  const crater = (craterVol ?? SAND_VOLUME * progress) * k;
+  const crater = (craterArea ?? SAND_AREA * progress) * k;
   const [lo0, hi0] = vRange(sign, sn, cs);
 
-  // Trichter (oben) bzw. Kegel (unten) relativ zur Sandebene
+  // Mulde (oben) bzw. Kegel (unten) relativ zur Sandebene, jeweils als Dreieck im Schnitt
   const feature = (L) => {
     const tc = Math.min(1, Math.max(0, (sign * L) / cs));
-    const w = radius(tc);
+    const w = innerRadius(tc);
     if (sign < 0) {
-      // Mulde: Kegel im Böschungswinkel, dessen Radius mit der Tiefe wächst (V = π/3 · d³ / tan²).
-      // Sie bleibt innerhalb der Glaswand und endet oberhalb des Halses.
-      const vc = Math.min(crater, 0.8 * V);
-      let d = Math.cbrt((3 * vc * REPOSE * REPOSE) / Math.PI);
+      // Mulde im Böschungswinkel: Fläche = Breite · Tiefe (Dreieck mit Grundseite 2·wc), also
+      // d = √(Fläche · tan). Sie bleibt innerhalb der Glaswand und endet oberhalb des Halses.
+      const ac = Math.min(crater, 0.8 * A);
+      let d = Math.sqrt(ac * REPOSE);
       d = Math.min(d, Math.max(0, tc - 0.05), 0.96 * w * REPOSE);
       const wc = d / REPOSE;
-      return { w: wc, amp: d, vol: (-Math.PI / 3) * wc * wc * d };
+      return { w: wc, amp: d, area: -wc * d };
     }
     const h = k * REPOSE * w;
-    return { w, amp: -h, vol: (Math.PI / 3) * w * w * h };
+    return { w, amp: -h, area: w * h };
   };
 
   // Wenig Sand unten: nur ein kleiner Kegel auf dem Boden, keine ebene Fläche
   if (sign > 0 && k > 0) {
-    const atFloor = planeVolume(sign, phi, hi0) + feature(hi0).vol - V;
+    const atFloor = planeArea(sign, phi, hi0) + feature(hi0).area - A;
     if (atFloor >= 0) {
-      const rc = Math.cbrt((3 * V) / (Math.PI * k * REPOSE));
+      const rc = Math.sqrt(A / (k * REPOSE));
       return { L: cs, uc: -sn, w: rc, amp: -k * REPOSE * rc, finite: true };
     }
   }
@@ -144,7 +151,7 @@ function solveBulb(sign, V, phi, progress, craterVol) {
   let hi = hi0;
   for (let it = 0; it < 40; it++) {
     const mid = 0.5 * (lo + hi);
-    const g = planeVolume(sign, phi, mid) + feature(mid).vol - V;
+    const g = planeArea(sign, phi, mid) + feature(mid).area - A;
     if (g > 0) lo = mid;
     else hi = mid;
   }
@@ -157,13 +164,13 @@ function solveBulb(sign, V, phi, progress, craterVol) {
  * Sandzustand für Fortschritt 0…1 und Kippwinkel phi (0 aufrecht, π/2 liegend).
  * Jeder Kolben liefert die Sandebene L (in Schwerkraftkoordinaten (u, v)), die Mitte uc
  * von Mulde/Kegel, dessen Radius w und Tiefe amp (> 0 Mulde, < 0 Kegel).
- * craterVol (optional) ist das Volumen der Mulde im oberen Kolben, sonst das bisher Abgeflossene.
+ * craterArea (optional) ist die Fläche der Mulde im oberen Kolben, sonst das bisher Abgeflossene.
  */
-export function sandState(progress, phi, craterVol) {
+export function sandState(progress, phi, craterArea) {
   const p = Math.min(1, Math.max(0, progress));
   return {
-    top: solveBulb(-1, SAND_VOLUME * (1 - p), phi, p, craterVol),
-    bottom: solveBulb(1, SAND_VOLUME * p, phi, p),
+    top: solveBulb(-1, SAND_AREA * (1 - p), phi, p, craterArea),
+    bottom: solveBulb(1, SAND_AREA * p, phi, p),
   };
 }
 

@@ -50,7 +50,7 @@ ist deshalb nach dem zweiten Start sichtbar. Werden Dateien hinzugefügt oder en
 | `index.html`, `css/style.css` | Oberfläche |
 | `js/app.js` | Zustände (Ruhe, läuft, Pause, abgelaufen), Eingabe, Ablaufschleife |
 | `js/timer.js` | Timer-Logik auf Zeitstempel-Basis, Eingabeprüfung |
-| `js/geometry.js` | Glasprofil und Sandverteilung (Schwerkraft, Trichter, Schüttkegel) |
+| `js/geometry.js` | Glasprofil und Sandverteilung (Schwerkraft, Mulde, Schüttkegel). Erhalten wird die sichtbare Sandfläche, damit beim Nachrutschen kein Sand scheinbar dazukommt |
 | `js/hourglass.js` | Canvas-Zeichnung, Hinlegen/Aufrichten |
 | `js/audio.js` | Alarmton und Vibration |
 | `js/wakelock.js` | Bildschirm wachhalten, nach Rückkehr in die App neu anfordern |

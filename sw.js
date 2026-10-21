@@ -3,7 +3,7 @@
 // Änderungen sind deshalb nach dem zweiten Start sichtbar. Bei neuen/entfernten Dateien
 // die Versionsnummer in CACHE erhöhen.
 
-const CACHE = 'sanduhr-v3';
+const CACHE = 'sanduhr-v4';
 const ASSETS = [
   './',
   './index.html',

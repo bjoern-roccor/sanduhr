@@ -6,7 +6,7 @@
 // Der Sand wird immer relativ zur Schwerkraft berechnet. Für theta > π/2 wird das Glas an
 // seiner Querachse gespiegelt (es ist symmetrisch), damit geometry.js nur 0…π/2 braucht.
 
-import { R, WALL, SAND_VOLUME, radius, outline, sandState, toLocal } from './geometry.js';
+import { R, WALL, SAND_AREA, radius, innerRadius, outline, sandState, toLocal } from './geometry.js';
 
 const PI = Math.PI;
 const HALF_W = 0.88; // halbe Breite der Holzplatten
@@ -72,7 +72,7 @@ export class Hourglass {
     this.settling = false;
     // Mulde im oberen Kolben: Die Mitte läuft ab, die Mulde vertieft sich bis zur kritischen
     // Neigung, dann rutscht Sand vom Rand nach, die Mulde läuft zusammen und baut sich neu auf.
-    this.vc = 0; // Volumen der Mulde
+    this.vc = 0; // Fläche der Mulde im Bild
     this.aval = null; // laufende Lawine { total, e, t, dur, side }
     this.sinceAval = 0;
     this.trigger = 0.5; // Muldenradius/Glasradius, ab dem Sand nachrutscht
@@ -246,12 +246,12 @@ export class Hourglass {
     if (this.settling) {
       if (canFlow) {
         const next = Math.min(1, this.pTrue + SETTLE_RATE * dt);
-        drain = (next - this.pTrue) * SAND_VOLUME;
+        drain = (next - this.pTrue) * SAND_AREA;
         this.pTrue = next;
       }
       if (this.pTrue >= 1) this.settling = false;
     } else {
-      drain = Math.max(0, progress - this.pTrue) * SAND_VOLUME;
+      drain = Math.max(0, progress - this.pTrue) * SAND_AREA;
       this.pTrue = progress;
     }
     const running = (flowing || this.settling) && canFlow && this.pTrue < 1;
@@ -290,6 +290,7 @@ export class Hourglass {
     const skew = this.aval ? this.aval.side * 0.45 * Math.sin(PI * Math.min(1, this.aval.t)) : 0;
     if (st.top) st.top.skew = skew;
     this.top = st.top ?? null;
+    this.lastDraw = { st, phiS, mirror, act };
 
     ctx.save();
     ctx.translate(W / 2, ground - (extH / 2) * Se);
@@ -301,6 +302,46 @@ export class Hourglass {
     this.#drawGlassFront();
     this.#drawPlates();
     ctx.restore();
+  }
+
+  /**
+   * Prüfhilfe: Fläche des Sandes (Einheiten², wie im Bild gezeichnet) getrennt nach Quelle
+   * (oberer Sand) und Ziel (unterer Sand). Rendert den Sand ohne Strahl in ein eigenes Canvas.
+   */
+  measureSand() {
+    if (!this.lastDraw) return null;
+    const { st, phiS, mirror, act } = this.lastDraw;
+    const size = 480;
+    const sc = size / 2.4;
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    const out = {};
+    for (const [name, b, clipTop, seed] of [['source', st.top, true, 1], ['sink', st.bottom, false, 7]]) {
+      if (!b) { out[name] = 0; continue; }
+      g.clearRect(0, 0, size, size);
+      g.save();
+      g.translate(size / 2, size / 2);
+      g.scale(sc, sc);
+      if (mirror) g.scale(1, -1);
+      g.clip(this.innerPath);
+      g.beginPath();
+      if (clipTop) g.rect(-1.5, -1.5, 3, 1.515);
+      else g.rect(-1.5, 0, 3, 1.5);
+      g.clip();
+      const { pts } = this.#surface(b, phiS, seed, act);
+      g.beginPath();
+      pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+      g.closePath();
+      g.fillStyle = '#fff';
+      g.fill();
+      g.restore();
+      const d = g.getImageData(0, 0, size, size).data;
+      let sum = 0;
+      for (let i = 3; i < d.length; i += 4) sum += d[i];
+      out[name] = sum / 255 / (sc * sc);
+    }
+    return out;
   }
 
   #drawShadow(cx, ground, lying, Se) {
@@ -384,14 +425,14 @@ export class Hourglass {
    * Gibt die Lawinenaktivität (0…1) zurück, mit der die Oberfläche stärker flimmert.
    */
   #updateSand(drain, dt, running) {
-    // Die Mulde oben sammelt, was in der Mitte abfließt
+    // Die Mulde oben sammelt (als Fläche im Bild), was in der Mitte abfließt
     this.vc += drain;
     const top = this.top;
     let ratio = 0;
     if (top && top.amp > 0) {
-      ratio = top.w / radius(Math.min(1, Math.abs(top.L)));
+      ratio = top.w / innerRadius(Math.min(1, Math.abs(top.L)));
       // Was die Geometrie nicht mehr darstellen kann (Wand, Hals), zählt nicht weiter
-      const shown = (Math.PI / 3) * top.w * top.w * top.amp;
+      const shown = top.w * top.amp;
       if (ratio > 0.93 || -top.L - top.amp < 0.052) this.vc = Math.min(this.vc, shown);
     }
     if (running) this.sinceAval += dt;
@@ -441,62 +482,84 @@ export class Hourglass {
     return this.aval ? Math.sin(PI * Math.min(1, this.aval.t)) : 0;
   }
 
-  /** Oberfläche eines Sandhaufens als Punktliste in Glaskoordinaten */
+  /**
+   * Oberfläche eines Sandhaufens als Punktliste in Glaskoordinaten.
+   * Die Form (Ebene, Mulde, Kegel) bestimmt die Sandfläche. Alles, was die Oberfläche belebt
+   * (Rauschen, Wellen, Körner), wird so verschoben, dass es im Mittel keine Fläche hinzufügt.
+   */
   #surface(b, phi, seed, act) {
     const sn = Math.sin(phi);
     const cs = Math.cos(phi);
-    const pts = [];
-    const add = (u, v) => pts.push([u * cs + v * sn, -u * sn + v * cs]);
-    const jitterAmp = 0.011 * (1 + 1.5 * act);
-    const jitter = (i) => (vnoise(i * 0.35 + seed * 13) - 0.5) * jitterAmp;
     const skew = b.skew ?? 0;
+    const finite = b.finite;
+    const n = finite ? 60 : 300;
+    const U0 = finite ? b.uc - b.w : -1.45;
+    const U1 = finite ? b.uc + b.w : 1.45;
+    const jAmp = 0.011 * (1 + 1.5 * act);
+    const waveAmp = 0.0045 * (1 + 1.5 * act);
+    const chordHalf = phi < 0.3 ? innerRadius(Math.min(1, Math.abs(b.L) / Math.max(cs, 0.3))) : R;
 
-    // Höhe der Oberfläche relativ zur Sandebene (v nach unten, Mulde positiv)
-    const height = (u) => {
-      const du = u - b.uc;
-      if (b.amp > 1e-6) {
-        const rho = du < 0 ? -du / (b.w * (1 + skew)) : du / (b.w * (1 - skew));
-        if (rho >= 1) return 0;
-        // Eine dünne Schicht Körner rutscht stetig zur Mitte
-        const wave = Math.sin(2 * PI * (3.2 * rho + 0.8 * this.clock)) * 4 * rho * (1 - rho);
-        return b.amp * (1 - rho) + 0.0045 * (1 + 1.5 * act) * wave;
-      }
-      if (b.amp < -1e-6) {
-        const rho = Math.abs(du) / b.w;
-        if (rho >= 1) return 0;
-        let f = b.amp * (1 - rho);
-        // Lawinen an den Flanken: kleine Wellen aus Körnern laufen vom Gipfel nach unten
-        for (const r of this.ripples) {
-          if (r.side * du < 0) continue;
-          const pos = r.t / r.dur;
-          f -= r.amp * Math.exp(-(((rho - pos) / 0.13) ** 2)) * (1 - 0.5 * pos) * Math.sin(PI * Math.min(1, pos * 1.3 + 0.2));
-        }
-        return f;
-      }
-      return 0;
-    };
-
-    if (b.finite) {
-      const base = b.L + 0.6;
-      add(b.uc - b.w, base);
-      const n = 60;
-      for (let i = 0; i <= n; i++) {
-        const u = b.uc - b.w + (2 * b.w * i) / n;
-        add(u, b.L + height(u) + (i > 0 && i < n ? jitter(i) : 0));
-      }
-      add(b.uc + b.w, base);
-      return { pts, surfaceFrom: 1, surfaceTo: n + 1 };
-    }
-    const U0 = -1.45;
-    const U1 = 1.45;
-    const n = 300;
-    add(U0, b.L + 3);
+    const us = [];
+    const h0 = []; // Grundform
+    const pert = []; // Belebung
     for (let i = 0; i <= n; i++) {
       const u = U0 + ((U1 - U0) * i) / n;
-      add(u, b.L + height(u) + jitter(i));
+      const du = u - b.uc;
+      let base = 0;
+      let p = 0;
+      if (b.amp > 1e-6) {
+        // Mulde; die Seiten können beim Rutschen ungleich breit sein (Fläche bleibt w · d)
+        const rho = du < 0 ? -du / (b.w * (1 + skew)) : du / (b.w * (1 - skew));
+        if (rho < 1) {
+          base = b.amp * (1 - rho);
+          // Eine dünne Schicht Körner rutscht stetig zur Mitte
+          p += waveAmp * Math.sin(2 * PI * (3.2 * rho + 0.8 * this.clock)) * 4 * rho * (1 - rho);
+        }
+      } else if (b.amp < -1e-6) {
+        const rho = Math.abs(du) / b.w;
+        if (rho < 1) {
+          base = b.amp * (1 - rho);
+          // Lawinen an den Flanken: vorn häufen sich Körner an, dahinter entsteht eine Delle
+          for (const r of this.ripples) {
+            if (r.side * du < 0) continue;
+            const pos = r.t / r.dur;
+            const g = (rho - pos) / 0.13;
+            const env = Math.sin(PI * Math.min(1, pos * 1.3 + 0.2)) * (1 - 0.5 * pos);
+            p -= r.amp * 1.6 * g * Math.exp(-g * g) * env;
+          }
+        }
+      }
+      p += (vnoise(i * 0.35 + seed * 13) - 0.5) * jAmp;
+      if (finite && (i === 0 || i === n)) p = 0;
+      us.push(u);
+      h0.push(base);
+      pert.push(p);
     }
-    add(U1, b.L + 3);
-    return { pts, surfaceFrom: 1, surfaceTo: n + 1 };
+    // Mittelwert der Belebung im Glas abziehen: sie darf keinen Sand erzeugen oder vernichten
+    let sum = 0;
+    let cnt = 0;
+    for (let i = 0; i <= n; i++) {
+      if (finite ? i > 0 && i < n : Math.abs(us[i]) <= chordHalf) {
+        sum += pert[i];
+        cnt++;
+      }
+    }
+    const mean = cnt ? sum / cnt : 0;
+
+    const pts = [];
+    const add = (u, v) => pts.push([u * cs + v * sn, -u * sn + v * cs]);
+    if (finite) {
+      add(U0, b.L + 0.6);
+      for (let i = 0; i <= n; i++) {
+        add(us[i], b.L + h0[i] + (i > 0 && i < n ? pert[i] - mean : 0));
+      }
+      add(U1, b.L + 0.6);
+    } else {
+      add(U0, b.L + 3);
+      for (let i = 0; i <= n; i++) add(us[i], b.L + h0[i] + pert[i] - mean);
+      add(U1, b.L + 3);
+    }
+    return { pts, surfaceFrom: 1, surfaceTo: n + 2 };
   }
 
   #drawBulbSand(b, phi, clipTop, seed, act) {

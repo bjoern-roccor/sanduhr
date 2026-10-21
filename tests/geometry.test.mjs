@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  radius, outline, sandState, toLocal, planeVolume,
-  BULB_VOLUME, SAND_VOLUME, NECK, R,
+  radius, outline, sandState, toLocal, planeArea,
+  BULB_AREA, SAND_AREA, NECK, R,
 } from '../js/geometry.js';
 
 test('Profil: Hals eng, Kolben breit, symmetrisch', () => {
@@ -15,8 +15,8 @@ test('Profil: Hals eng, Kolben breit, symmetrisch', () => {
   assert.ok(outline(0).length > 100);
 });
 
-test('Sandmenge passt in einen Kolben', () => {
-  assert.ok(SAND_VOLUME > 0.2 * BULB_VOLUME && SAND_VOLUME < 0.7 * BULB_VOLUME);
+test('Sandfläche passt in einen Kolben', () => {
+  assert.ok(SAND_AREA > 0.2 * BULB_AREA && SAND_AREA < 0.7 * BULB_AREA);
 });
 
 test('aufrecht: Sand wandert von oben nach unten', () => {
@@ -45,14 +45,14 @@ test('aufrecht: Kegelspitze bleibt unterhalb des Halses, Sand im Glas', () => {
   }
 });
 
-test('Volumenerhaltung im gekippten Zustand (ohne Kegel/Trichter)', () => {
+test('Flächenerhaltung im gekippten Zustand (ohne Kegel/Mulde)', () => {
   for (const phi of [0.4, 0.8, Math.PI / 2]) {
     for (const p of [0.1, 0.5, 0.9]) {
       const s = sandState(p, phi);
-      const vt = planeVolume(-1, phi, s.top.L);
-      const vb = planeVolume(1, phi, s.bottom.L);
-      assert.ok(Math.abs(vt - SAND_VOLUME * (1 - p)) < 2e-3, `oben phi=${phi} p=${p}`);
-      assert.ok(Math.abs(vb - SAND_VOLUME * p) < 2e-3, `unten phi=${phi} p=${p}`);
+      const vt = planeArea(-1, phi, s.top.L);
+      const vb = planeArea(1, phi, s.bottom.L);
+      assert.ok(Math.abs(vt - SAND_AREA * (1 - p)) < 2e-3, `oben phi=${phi} p=${p}`);
+      assert.ok(Math.abs(vb - SAND_AREA * p) < 2e-3, `unten phi=${phi} p=${p}`);
     }
   }
 });
@@ -75,24 +75,34 @@ test('Übergang aufrecht → gekippt ist stetig', () => {
   }
 });
 
-test('Mulde: Volumen bleibt erhalten, kleinere Mulde senkt den Rand', () => {
+test('Mulde: Fläche bleibt erhalten, kleinere Mulde senkt den Rand', () => {
   const p = 0.4;
-  const V = SAND_VOLUME * (1 - p);
-  const big = sandState(p, 0, 0.02).top;
-  const small = sandState(p, 0, 0.004).top;
+  const A = SAND_AREA * (1 - p);
+  const big = sandState(p, 0, 0.05).top;
+  const small = sandState(p, 0, 0.01).top;
   for (const t of [big, small]) {
-    const vol = planeVolume(-1, 0, t.L) - (Math.PI / 3) * t.w * t.w * t.amp;
-    assert.ok(Math.abs(vol - V) < 3e-3, `Volumen ${vol} statt ${V}`);
+    const area = planeArea(-1, 0, t.L) - t.w * t.amp; // Ebene minus Dreieck der Mulde
+    assert.ok(Math.abs(area - A) < 2e-3, `Fläche ${area} statt ${A}`);
   }
   // Rutscht Sand vom Rand in die Mulde, sinkt der Rand (y nach unten, oben ist L negativ → größer)
   assert.ok(small.L > big.L, 'Rand sinkt nach dem Zusammenrutschen');
   assert.ok(small.amp < big.amp && small.w < big.w);
 });
 
-test('Mulde: wächst mit dem Volumen, Böschungswinkel bleibt, Spitze über dem Hals', () => {
+test('Rutschen: sichtbare Sandfläche oben bleibt gleich (oder wird kleiner)', () => {
+  // Zustand vor und nach einem Zusammenrutschen der Mulde bei gleichem Fortschritt
+  for (const p of [0.1, 0.3, 0.5, 0.7]) {
+    const before = sandState(p, 0, 0.09).top;
+    const after = sandState(p, 0, 0.02).top;
+    const area = (t) => planeArea(-1, 0, t.L) - t.w * t.amp;
+    assert.ok(Math.abs(area(before) - area(after)) < 2e-3, `p=${p}`);
+  }
+});
+
+test('Mulde: wächst mit der Fläche, Böschungswinkel bleibt, Spitze über dem Hals', () => {
   let prev = 0;
-  for (let vc = 0.001; vc < 0.05; vc += 0.002) {
-    const t = sandState(0.3, 0, vc).top;
+  for (let ac = 0.002; ac < 0.12; ac += 0.004) {
+    const t = sandState(0.3, 0, ac).top;
     assert.ok(t.amp >= prev - 1e-9);
     prev = t.amp;
     assert.ok(Math.abs(t.amp / t.w - Math.tan((34 * Math.PI) / 180)) < 1e-6 || t.w === 0);
@@ -101,6 +111,14 @@ test('Mulde: wächst mit dem Volumen, Böschungswinkel bleibt, Spitze über dem 
 });
 
 test('Mulde verschwindet beim Kippen', () => {
-  assert.ok(sandState(0.4, 0, 0.02).top.amp > 0.05);
-  assert.ok(Math.abs(sandState(0.4, 0.35, 0.02).top.amp) < 1e-9);
+  assert.ok(sandState(0.4, 0, 0.05).top.amp > 0.05);
+  assert.ok(Math.abs(sandState(0.4, 0.35, 0.05).top.amp) < 1e-9);
+});
+
+test('Kegel unten: Fläche aus Ebene plus Dreieck ergibt die Sandfläche', () => {
+  for (const p of [0.2, 0.5, 0.9]) {
+    const b = sandState(p, 0).bottom;
+    const area = planeArea(1, 0, b.L) + b.w * -b.amp;
+    assert.ok(Math.abs(area - SAND_AREA * p) < 2e-3, `p=${p}`);
+  }
 });
