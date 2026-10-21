@@ -5,7 +5,7 @@ Sanduhr als Progressive Web App (PWA) für das Android-Handy.
 - Zeit in Minuten und Sekunden einstellen (1 Sekunde bis 30:00), dazu Schnellwahl
 - Realistisch gezeichnete Sanduhr: Glas, Holzrahmen, Sandtrichter, Schüttkegel, rieselnder Strahl aus einzelnen Körnern
 - Vor dem Start liegt der gesamte Sand unten. **Start** dreht die Sanduhr um, erst wenn der Sand zur Ruhe kommt, läuft die Zeit
-- Der Sand ist zäh: Er rutscht ruckartig nach (bei langen Zeiten deutlich sichtbar), der Strahl klumpt und reißt kurz ab, und beim Kippen folgt die Sandoberfläche der Schwerkraft mit Verzögerung
+- Der Sand verhält sich wie echter Sand: Der Durchfluss ist konstant. Im oberen Kolben bildet sich eine Mulde im Böschungswinkel, sie vertieft sich, bis Sand vom Rand zufällig nach einer Seite nachrutscht, die Mulde läuft zusammen und baut sich neu auf. Auf dem Kegel unten laufen kleine Lawinen die Flanken hinab, der Strahl klumpt und reißt kurz ab, und beim Kippen folgt die Oberfläche der Schwerkraft verzögert
 - **Pause**: Die Sanduhr legt sich auf die Seite, der Sand liegt waagerecht, die Zeit steht. Mit **Weiter** richtet sie sich wieder auf (auch durch Antippen der Sanduhr)
 - **Signal** bei Ablauf: Glockenton (per Web Audio erzeugt) und Vibration
 - **Bildschirm bleibt an**, ohne Dimmen, solange die App läuft oder pausiert (Screen Wake Lock)

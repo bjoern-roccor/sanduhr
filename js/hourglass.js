@@ -6,7 +6,7 @@
 // Der Sand wird immer relativ zur Schwerkraft berechnet. Für theta > π/2 wird das Glas an
 // seiner Querachse gespiegelt (es ist symmetrisch), damit geometry.js nur 0…π/2 braucht.
 
-import { R, WALL, radius, outline, sandState, toLocal } from './geometry.js';
+import { R, WALL, SAND_VOLUME, radius, outline, sandState, toLocal } from './geometry.js';
 
 const PI = Math.PI;
 const HALF_W = 0.88; // halbe Breite der Holzplatten
@@ -15,7 +15,6 @@ const POST_X = 0.745;
 const SAND_LAG = 5; // 1/s: Der Sand folgt der Schwerkraftrichtung zähflüssig
 const SETTLE_RATE = 0.9; // Fortschritt pro Sekunde, wenn der Rest beim Zurücksetzen ausläuft
 const GRAVITY = 2.4; // Fallbeschleunigung der Sandkörner im Strahl (Einheiten/s²)
-const JERKY_BELOW = 0.03; // ab dieser Ablaufgeschwindigkeit (Fortschritt/s) ruckelt der Sand nicht mehr
 
 const BRIGHT = [168, 118, 63];
 const MID = [107, 67, 34];
@@ -70,11 +69,18 @@ export class Hourglass {
 
     // Sand
     this.pTrue = 1; // echter Fortschritt (1 = Sand ganz unten, so steht die Uhr vor dem Start)
-    this.pv = 1; // angezeigter Fortschritt (ruckelt beim Nachrutschen)
-    this.rate = 0; // Ablaufgeschwindigkeit (Fortschritt/s)
-    this.slip = null; // laufender Rutsch { from, to, t, dur }
-    this.threshold = 0.004;
     this.settling = false;
+    // Mulde im oberen Kolben: Die Mitte läuft ab, die Mulde vertieft sich bis zur kritischen
+    // Neigung, dann rutscht Sand vom Rand nach, die Mulde läuft zusammen und baut sich neu auf.
+    this.vc = 0; // Volumen der Mulde
+    this.aval = null; // laufende Lawine { total, e, t, dur, side }
+    this.sinceAval = 0;
+    this.trigger = 0.5; // Muldenradius/Glasradius, ab dem Sand nachrutscht
+    this.timeTrigger = 10; // spätestens nach so vielen Sekunden rutscht auch eine kleinere Lawine
+    this.top = null; // zuletzt berechneter Zustand des oberen Sandes
+    // Körner, die über die Flanken des Kegels unten rutschen
+    this.ripples = [];
+    this.nextRipple = 0.5;
 
     // Rieselstrahl
     this.flow = 0;
@@ -117,8 +123,12 @@ export class Hourglass {
   flip(cb) {
     this.settling = false;
     this.base ^= 1;
-    this.pTrue = this.pv = 0; // der Sand ist jetzt oben, der Fortschritt beginnt neu
-    this.slip = null;
+    this.pTrue = 0; // der Sand ist jetzt oben, der Fortschritt beginnt neu
+    this.vc = 0;
+    this.aval = null;
+    this.sinceAval = 0;
+    this.top = null;
+    this.ripples.length = 0;
     this.stream.length = 0;
     this.splash.length = 0;
     this.flipCb = cb;
@@ -147,7 +157,7 @@ export class Hourglass {
       || this.anim !== null
       || this.flipPending
       || this.settling
-      || this.slip !== null
+      || this.ripples.length > 0
       || Math.abs(this.sandTheta - this.theta) > 0.002
       || Math.abs(this.flow - this.flowTarget) > 0.004
       || this.stream.length > 0
@@ -230,36 +240,22 @@ export class Hourglass {
       cb?.();
     }
 
-    // Fortschritt
+    // Fortschritt: Der Durchfluss ist konstant, der Füllstand sinkt gleichmäßig
     const canFlow = calm && !this.paused;
+    let drain = 0; // in diesem Bild abgeflossenes Volumen
     if (this.settling) {
-      if (canFlow) this.pTrue = Math.min(1, this.pTrue + SETTLE_RATE * dt);
+      if (canFlow) {
+        const next = Math.min(1, this.pTrue + SETTLE_RATE * dt);
+        drain = (next - this.pTrue) * SAND_VOLUME;
+        this.pTrue = next;
+      }
       if (this.pTrue >= 1) this.settling = false;
     } else {
-      if (dt > 0) {
-        const speed = Math.max(0, progress - this.pTrue) / dt;
-        this.rate += (speed - this.rate) * (1 - Math.exp(-dt * 2));
-      }
+      drain = Math.max(0, progress - this.pTrue) * SAND_VOLUME;
       this.pTrue = progress;
     }
     const running = (flowing || this.settling) && canFlow && this.pTrue < 1;
-
-    // Ruckartiges Nachrutschen: Der Sand bleibt kurz haften und rutscht dann ein Stück nach
-    let surge = 0;
-    if (!running || this.settling || this.rate > JERKY_BELOW) {
-      this.slip = null;
-      this.pv = this.pTrue;
-    } else if (this.slip) {
-      const s = this.slip;
-      s.t += dt / s.dur;
-      const u = Math.min(1, s.t);
-      this.pv = s.from + (s.to - s.from) * (1 - (1 - u) ** 2);
-      surge = Math.sin(PI * u);
-      if (u >= 1) this.slip = null;
-    } else if (this.pTrue - this.pv > this.threshold || (this.pTrue >= 1 && this.pTrue > this.pv)) {
-      this.slip = { from: this.pv, to: this.pTrue, t: 0, dur: 0.2 + Math.random() * 0.25 };
-      this.threshold = 0.0025 + Math.random() * 0.006;
-    }
+    const act = this.#updateSand(drain, dt, running);
 
     // Rieselstrahl ein-/ausblenden
     this.flowTarget = running ? 1 : 0;
@@ -288,9 +284,12 @@ export class Hourglass {
     this.#drawShadow(W / 2, ground, Math.abs(s), Se);
 
     const mirror = this.sandTheta > PI / 2;
-    const fb = this.base === 0 ? this.pv : 1 - this.pv; // Anteil des Sandes in der unteren Glashälfte
+    const fb = this.base === 0 ? this.pTrue : 1 - this.pTrue; // Anteil des Sandes in der unteren Glashälfte
     const phiS = mirror ? PI - this.sandTheta : this.sandTheta;
-    const st = sandState(mirror ? 1 - fb : fb, phiS);
+    const st = sandState(mirror ? 1 - fb : fb, phiS, this.vc);
+    const skew = this.aval ? this.aval.side * 0.45 * Math.sin(PI * Math.min(1, this.aval.t)) : 0;
+    if (st.top) st.top.skew = skew;
+    this.top = st.top ?? null;
 
     ctx.save();
     ctx.translate(W / 2, ground - (extH / 2) * Se);
@@ -298,7 +297,7 @@ export class Hourglass {
     ctx.rotate(this.theta);
     this.#drawPosts();
     this.#drawGlassBack();
-    this.#drawSand(st, phiS, mirror, surge, dt);
+    this.#drawSand(st, phiS, mirror, act, dt);
     this.#drawGlassFront();
     this.#drawPlates();
     ctx.restore();
@@ -379,43 +378,130 @@ export class Hourglass {
     return g;
   }
 
+  /**
+   * Sandverlauf und Bewegung der Oberfläche.
+   * drain: in diesem Bild abgeflossenes Volumen, running: Sand rieselt gerade.
+   * Gibt die Lawinenaktivität (0…1) zurück, mit der die Oberfläche stärker flimmert.
+   */
+  #updateSand(drain, dt, running) {
+    // Die Mulde oben sammelt, was in der Mitte abfließt
+    this.vc += drain;
+    const top = this.top;
+    let ratio = 0;
+    if (top && top.amp > 0) {
+      ratio = top.w / radius(Math.min(1, Math.abs(top.L)));
+      // Was die Geometrie nicht mehr darstellen kann (Wand, Hals), zählt nicht weiter
+      const shown = (Math.PI / 3) * top.w * top.w * top.amp;
+      if (ratio > 0.93 || -top.L - top.amp < 0.052) this.vc = Math.min(this.vc, shown);
+    }
+    if (running) this.sinceAval += dt;
+
+    if (this.aval) {
+      // Lawine: Sand rutscht vom Rand in die Mulde, sie läuft zusammen
+      const a = this.aval;
+      a.t += dt / a.dur;
+      const u = Math.min(1, a.t);
+      const e = u * u * (3 - 2 * u);
+      this.vc -= a.total * (e - a.e);
+      a.e = e;
+      if (u >= 1) {
+        this.aval = null;
+        this.sinceAval = 0;
+      }
+    } else if (running && top && top.amp > 0.03 && this.sinceAval > 1.2
+      && (ratio > this.trigger || (this.sinceAval > this.timeTrigger && ratio > 0.28))) {
+      // Kritische Neigung erreicht (oder zufällig früher): Teil der Mulde füllt sich wieder
+      const big = ratio > this.trigger;
+      const keep = big ? 0.02 + Math.random() * 0.13 : 0.2 + Math.random() * 0.3;
+      this.aval = {
+        total: this.vc * (1 - keep),
+        e: 0,
+        t: 0,
+        dur: (big ? 0.7 : 0.45) + Math.random() * 0.6,
+        side: Math.random() < 0.5 ? -1 : 1,
+      };
+      this.trigger = 0.38 + Math.random() * 0.32;
+      this.timeTrigger = 6 + Math.random() * 12;
+    }
+    this.vc = Math.max(0, this.vc);
+
+    // Körner rutschen in Wellen über den Sandkegel unten
+    if (running) {
+      this.nextRipple -= dt;
+      if (this.nextRipple <= 0) {
+        this.ripples.push({ side: Math.random() < 0.5 ? -1 : 1, t: 0, dur: 0.9 + Math.random() * 0.7, amp: 0.012 + Math.random() * 0.012 });
+        this.nextRipple = 0.5 + Math.random() * 1.8;
+      }
+    }
+    for (let i = this.ripples.length - 1; i >= 0; i--) {
+      const r = this.ripples[i];
+      r.t += dt;
+      if (r.t > r.dur) this.ripples.splice(i, 1);
+    }
+    return this.aval ? Math.sin(PI * Math.min(1, this.aval.t)) : 0;
+  }
+
   /** Oberfläche eines Sandhaufens als Punktliste in Glaskoordinaten */
-  #surface(b, phi, seed, agit) {
+  #surface(b, phi, seed, act) {
     const sn = Math.sin(phi);
     const cs = Math.cos(phi);
     const pts = [];
     const add = (u, v) => pts.push([u * cs + v * sn, -u * sn + v * cs]);
-    const amp = 0.007 * (1 + 3.5 * agit);
-    const jitter = (i) => (hash(i * 3.17 + seed + Math.floor(this.clock * 14 * agit)) - 0.5) * amp;
+    const jitterAmp = 0.011 * (1 + 1.5 * act);
+    const jitter = (i) => (vnoise(i * 0.35 + seed * 13) - 0.5) * jitterAmp;
+    const skew = b.skew ?? 0;
+
+    // Höhe der Oberfläche relativ zur Sandebene (v nach unten, Mulde positiv)
+    const height = (u) => {
+      const du = u - b.uc;
+      if (b.amp > 1e-6) {
+        const rho = du < 0 ? -du / (b.w * (1 + skew)) : du / (b.w * (1 - skew));
+        if (rho >= 1) return 0;
+        // Eine dünne Schicht Körner rutscht stetig zur Mitte
+        const wave = Math.sin(2 * PI * (3.2 * rho + 0.8 * this.clock)) * 4 * rho * (1 - rho);
+        return b.amp * (1 - rho) + 0.0045 * (1 + 1.5 * act) * wave;
+      }
+      if (b.amp < -1e-6) {
+        const rho = Math.abs(du) / b.w;
+        if (rho >= 1) return 0;
+        let f = b.amp * (1 - rho);
+        // Lawinen an den Flanken: kleine Wellen aus Körnern laufen vom Gipfel nach unten
+        for (const r of this.ripples) {
+          if (r.side * du < 0) continue;
+          const pos = r.t / r.dur;
+          f -= r.amp * Math.exp(-(((rho - pos) / 0.13) ** 2)) * (1 - 0.5 * pos) * Math.sin(PI * Math.min(1, pos * 1.3 + 0.2));
+        }
+        return f;
+      }
+      return 0;
+    };
+
     if (b.finite) {
       const base = b.L + 0.6;
       add(b.uc - b.w, base);
-      const n = 40;
+      const n = 60;
       for (let i = 0; i <= n; i++) {
         const u = b.uc - b.w + (2 * b.w * i) / n;
-        const rho = Math.abs(u - b.uc) / b.w;
-        add(u, b.L + b.amp * (1 - rho) + (i > 0 && i < n ? jitter(i) : 0));
+        add(u, b.L + height(u) + (i > 0 && i < n ? jitter(i) : 0));
       }
       add(b.uc + b.w, base);
       return { pts, surfaceFrom: 1, surfaceTo: n + 1 };
     }
     const U0 = -1.45;
     const U1 = 1.45;
-    const n = 240;
+    const n = 300;
     add(U0, b.L + 3);
     for (let i = 0; i <= n; i++) {
       const u = U0 + ((U1 - U0) * i) / n;
-      const rho = Math.abs(u - b.uc) / b.w;
-      const f = rho < 1 ? b.amp * (1 - rho) : 0;
-      add(u, b.L + f + jitter(i));
+      add(u, b.L + height(u) + jitter(i));
     }
     add(U1, b.L + 3);
     return { pts, surfaceFrom: 1, surfaceTo: n + 1 };
   }
 
-  #drawBulbSand(b, phi, clipTop, seed, agit) {
+  #drawBulbSand(b, phi, clipTop, seed, act) {
     const { ctx } = this;
-    const { pts, surfaceFrom, surfaceTo } = this.#surface(b, phi, seed, agit);
+    const { pts, surfaceFrom, surfaceTo } = this.#surface(b, phi, seed, act);
     ctx.save();
     ctx.beginPath();
     if (clipTop) ctx.rect(-1.5, -1.5, 3, 1.515);
@@ -449,14 +535,14 @@ export class Hourglass {
     ctx.restore();
   }
 
-  #drawSand(st, phi, mirror, surge, dt) {
+  #drawSand(st, phi, mirror, act, dt) {
     const { ctx } = this;
     ctx.save();
     ctx.clip(this.innerPath);
     ctx.save();
     if (mirror) ctx.scale(1, -1); // gespiegeltes Glas: oben ist die Quelle, unten die Mulde
-    if (st.top) this.#drawBulbSand(st.top, phi, true, 1, surge);
-    if (st.bottom) this.#drawBulbSand(st.bottom, phi, false, 7, surge);
+    if (st.top) this.#drawBulbSand(st.top, phi, true, 1, act);
+    if (st.bottom) this.#drawBulbSand(st.bottom, phi, false, 7, act);
 
     // weiche Schattierung zum Glasrand hin
     const shade = ctx.createLinearGradient(-R, 0, R, 0);
@@ -469,21 +555,21 @@ export class Hourglass {
     ctx.fillRect(-R, -1, 2 * R, 2);
     ctx.globalCompositeOperation = 'source-over';
 
-    if (this.flow > 0.004) this.#drawStream(st.bottom, phi, surge, dt);
+    if (this.flow > 0.004) this.#drawStream(st.bottom, phi, dt);
     ctx.restore();
     ctx.restore();
   }
 
   /** Strahl aus einzelnen Körnern: Sand reißt ab, klumpt und fällt beschleunigt */
-  #drawStream(b, phi, surge, dt) {
+  #drawStream(b, phi, dt) {
     const { ctx } = this;
     const apex = b ? toLocal(b.uc, b.L + b.amp, phi) : { x: 0, y: 0.98 };
     const apexY = Math.min(0.99, apex.y);
     const y0 = -0.03;
     const n1 = vnoise(this.clock * 2.1);
     const n2 = vnoise(this.clock * 5.3 + 10);
-    const gap = n1 < 0.2; // kurz dünner Strahl, einzelne Körner lösen sich
-    const flux = Math.min(1.5, 0.7 + 0.45 * n1 + 0.2 * n2 + 0.55 * surge);
+    const gap = n1 < 0.12; // kurz dünner Strahl, einzelne Körner lösen sich
+    const flux = 0.82 + 0.3 * n1 + 0.15 * n2; // der Durchfluss ist praktisch konstant
 
     // neue Körner
     this.spawnAcc += (gap ? 18 : 95 * flux) * dt;

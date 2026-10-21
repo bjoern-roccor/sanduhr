@@ -74,3 +74,33 @@ test('Übergang aufrecht → gekippt ist stetig', () => {
     prev = L;
   }
 });
+
+test('Mulde: Volumen bleibt erhalten, kleinere Mulde senkt den Rand', () => {
+  const p = 0.4;
+  const V = SAND_VOLUME * (1 - p);
+  const big = sandState(p, 0, 0.02).top;
+  const small = sandState(p, 0, 0.004).top;
+  for (const t of [big, small]) {
+    const vol = planeVolume(-1, 0, t.L) - (Math.PI / 3) * t.w * t.w * t.amp;
+    assert.ok(Math.abs(vol - V) < 3e-3, `Volumen ${vol} statt ${V}`);
+  }
+  // Rutscht Sand vom Rand in die Mulde, sinkt der Rand (y nach unten, oben ist L negativ → größer)
+  assert.ok(small.L > big.L, 'Rand sinkt nach dem Zusammenrutschen');
+  assert.ok(small.amp < big.amp && small.w < big.w);
+});
+
+test('Mulde: wächst mit dem Volumen, Böschungswinkel bleibt, Spitze über dem Hals', () => {
+  let prev = 0;
+  for (let vc = 0.001; vc < 0.05; vc += 0.002) {
+    const t = sandState(0.3, 0, vc).top;
+    assert.ok(t.amp >= prev - 1e-9);
+    prev = t.amp;
+    assert.ok(Math.abs(t.amp / t.w - Math.tan((34 * Math.PI) / 180)) < 1e-6 || t.w === 0);
+    assert.ok(-t.L - t.amp >= 0.049, 'Spitze zu nah am Hals');
+  }
+});
+
+test('Mulde verschwindet beim Kippen', () => {
+  assert.ok(sandState(0.4, 0, 0.02).top.amp > 0.05);
+  assert.ok(Math.abs(sandState(0.4, 0.35, 0.02).top.amp) < 1e-9);
+});

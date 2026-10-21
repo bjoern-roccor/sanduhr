@@ -105,13 +105,13 @@ function vRange(sign, sn, cs) {
   return [lo, hi];
 }
 
-function solveBulb(sign, V, phi, progress) {
+function solveBulb(sign, V, phi, progress, craterVol) {
   if (V < 1e-5) return null;
   const sn = Math.sin(phi);
   const cs = Math.max(Math.cos(phi), 1e-3);
   const k = Math.max(0, 1 - phi / FEATURE_FADE); // 1 aufrecht … 0 gekippt
-  // Der Trichter kann nur so viel Volumen haben, wie schon abgeflossen ist
-  const drained = SAND_VOLUME * progress;
+  // Ohne Vorgabe fließt alles Abgeflossene in die Mulde
+  const crater = (craterVol ?? SAND_VOLUME * progress) * k;
   const [lo0, hi0] = vRange(sign, sn, cs);
 
   // Trichter (oben) bzw. Kegel (unten) relativ zur Sandebene
@@ -119,9 +119,13 @@ function solveBulb(sign, V, phi, progress) {
     const tc = Math.min(1, Math.max(0, (sign * L) / cs));
     const w = radius(tc);
     if (sign < 0) {
-      const dFull = k * Math.min(REPOSE * w, 0.8 * tc);
-      const vol = Math.min((Math.PI / 3) * w * w * dFull, k * drained);
-      return { w, amp: (3 * vol) / (Math.PI * w * w), vol: -vol };
+      // Mulde: Kegel im Böschungswinkel, dessen Radius mit der Tiefe wächst (V = π/3 · d³ / tan²).
+      // Sie bleibt innerhalb der Glaswand und endet oberhalb des Halses.
+      const vc = Math.min(crater, 0.8 * V);
+      let d = Math.cbrt((3 * vc * REPOSE * REPOSE) / Math.PI);
+      d = Math.min(d, Math.max(0, tc - 0.05), 0.96 * w * REPOSE);
+      const wc = d / REPOSE;
+      return { w: wc, amp: d, vol: (-Math.PI / 3) * wc * wc * d };
     }
     const h = k * REPOSE * w;
     return { w, amp: -h, vol: (Math.PI / 3) * w * w * h };
@@ -152,12 +156,13 @@ function solveBulb(sign, V, phi, progress) {
 /**
  * Sandzustand für Fortschritt 0…1 und Kippwinkel phi (0 aufrecht, π/2 liegend).
  * Jeder Kolben liefert die Sandebene L (in Schwerkraftkoordinaten (u, v)), die Mitte uc
- * von Trichter/Kegel, dessen Radius w und Tiefe amp (> 0 Trichter, < 0 Kegel).
+ * von Mulde/Kegel, dessen Radius w und Tiefe amp (> 0 Mulde, < 0 Kegel).
+ * craterVol (optional) ist das Volumen der Mulde im oberen Kolben, sonst das bisher Abgeflossene.
  */
-export function sandState(progress, phi) {
+export function sandState(progress, phi, craterVol) {
   const p = Math.min(1, Math.max(0, progress));
   return {
-    top: solveBulb(-1, SAND_VOLUME * (1 - p), phi, p),
+    top: solveBulb(-1, SAND_VOLUME * (1 - p), phi, p, craterVol),
     bottom: solveBulb(1, SAND_VOLUME * p, phi, p),
   };
 }
