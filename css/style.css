@@ -1,0 +1,171 @@
+:root {
+  --bg: #14110f;
+  --bg-2: #1e1814;
+  --text: #f1e6d3;
+  --muted: #a8977e;
+  --amber: #e2a93c;
+  --amber-dark: #b27c1c;
+  --line: #3a2f25;
+  --ok: #7fc47f;
+  --warn: #e0a24a;
+  --danger: #d9694f;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overscroll-behavior: none;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.app {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background:
+    radial-gradient(120% 60% at 50% 38%, #2a2118 0%, rgba(20, 17, 15, 0) 70%),
+    var(--bg);
+}
+
+/* Bühne mit der Sanduhr */
+.stage {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 220px;
+}
+.stage canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Bedienfeld */
+.panel {
+  flex: 0 0 auto;
+  padding: 8px 16px 18px;
+  max-width: 480px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.clock { min-height: 150px; display: flex; flex-direction: column; justify-content: center; }
+
+/* Einstellung */
+.setup { display: grid; gap: 8px; }
+.row {
+  display: grid;
+  grid-template-columns: 1fr 52px 84px 52px;
+  align-items: center;
+  gap: 8px;
+}
+.row-label { color: var(--muted); font-size: 0.95rem; letter-spacing: 0.04em; }
+.step {
+  height: 48px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 1.6rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.step:active { background: #2a2119; }
+.num {
+  width: 100%;
+  height: 48px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #0f0c0a;
+  color: var(--text);
+  font: 600 1.7rem/1 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.num:focus { outline: 2px solid var(--amber); outline-offset: 1px; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.chip {
+  flex: 1 1 auto;
+  min-width: 52px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.chip[aria-pressed="true"] { color: var(--bg); background: var(--amber); border-color: var(--amber); }
+
+/* Laufanzeige */
+.run { display: none; text-align: center; }
+.readout {
+  display: block;
+  font-size: clamp(3.4rem, 17vw, 5rem);
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  line-height: 1.1;
+}
+.status { margin: 4px 0 0; min-height: 1.4em; color: var(--muted); font-size: 1rem; }
+
+body:not([data-state="idle"]) .setup { display: none; }
+body:not([data-state="idle"]) .run { display: block; }
+body[data-state="finished"] .readout { color: var(--amber); animation: blink 1s steps(2, start) infinite; }
+@keyframes blink { 50% { opacity: 0.35; } }
+
+/* Schaltflächen */
+.actions { display: flex; gap: 10px; margin-top: 12px; }
+.btn {
+  display: none;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  height: 56px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn.primary {
+  flex: 1.4 1 0;
+  background: linear-gradient(#efb94c, var(--amber-dark));
+  border-color: transparent;
+  color: #1b1208;
+}
+.btn:active { filter: brightness(0.9); }
+body[data-state="idle"] .btn[data-for~="idle"],
+body[data-state="running"] .btn[data-for~="running"],
+body[data-state="paused"] .btn[data-for~="paused"],
+body[data-state="finished"] .btn[data-for~="finished"] { display: inline-flex; }
+
+.hint { margin: 10px 0 0; text-align: center; font-size: 0.82rem; color: var(--muted); }
+.hint[data-level="ok"]::before { content: "● "; color: var(--ok); }
+.hint[data-level="warn"] { color: var(--warn); }
+body[data-state="idle"] .hint { display: none; }
+
+/* Kleine Bildschirme */
+@media (max-height: 640px) {
+  .clock { min-height: 128px; }
+  .step, .num { height: 42px; }
+  .btn { height: 50px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  body[data-state="finished"] .readout { animation: none; }
+}

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sanduhr Vorschau</title>
+<!-- Entwicklungshilfe: zeigt die Sanduhr in einem festen Zustand.
+     Beispiel: /tools/preview.html?p=0.4&paused=1&flow=1 -->
+<style>
+  html, body { margin: 0; height: 100%; background: #14110f; }
+  #stage { position: absolute; inset: 0; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas></div>
+<script type="module">
+  import { Hourglass } from '../js/hourglass.js';
+  const q = new URLSearchParams(location.search);
+  const p = Number(q.get('p') ?? 0.4);
+  const paused = q.get('paused') === '1';
+  const flow = q.get('flow') !== '0';
+  const hg = new Hourglass(document.getElementById('c'));
+  hg.setPaused(paused);
+  // Die Schleife läuft durchgehend, wie in der App (Resize leert das Canvas)
+  let t = 0;
+  function frame() {
+    t += 16;
+    if (hg.busy || (flow && !paused)) hg.draw(t, p, flow && !paused);
+    requestAnimationFrame(frame);
+  }
+  frame();
+</script>
+</body>
+</html>

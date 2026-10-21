@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#14110f">
+<meta name="description" content="Sanduhr mit Pause, Alarm und Bildschirm-Wachhaltung">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Sanduhr</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body data-state="idle">
+<main class="app">
+  <section class="stage" id="stage">
+    <canvas id="glass" role="img" aria-label="Sanduhr"></canvas>
+  </section>
+
+  <section class="panel">
+    <div class="clock">
+      <!-- Einstellung der Zeit (nur im Ruhezustand) -->
+      <div class="setup" id="setup">
+        <div class="row">
+          <span class="row-label">Minuten</span>
+          <button class="step" type="button" data-delta="-60" aria-label="Eine Minute weniger">−</button>
+          <input id="min" class="num" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2" autocomplete="off" aria-label="Minuten (0 bis 30)">
+          <button class="step" type="button" data-delta="60" aria-label="Eine Minute mehr">+</button>
+        </div>
+        <div class="row">
+          <span class="row-label">Sekunden</span>
+          <button class="step" type="button" data-delta="-1" aria-label="Eine Sekunde weniger">−</button>
+          <input id="sec" class="num" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2" autocomplete="off" aria-label="Sekunden (0 bis 59)">
+          <button class="step" type="button" data-delta="1" aria-label="Eine Sekunde mehr">+</button>
+        </div>
+        <div class="chips" id="chips" role="group" aria-label="Schnellwahl"></div>
+      </div>
+
+      <!-- Restzeit (alle Zustände außer Ruhe) -->
+      <div class="run">
+        <output class="readout" id="readout" aria-live="off">05:00</output>
+        <p class="status" id="status"></p>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn primary" id="startBtn" type="button" data-for="idle">Start</button>
+      <button class="btn primary" id="pauseBtn" type="button" data-for="running paused">Pause</button>
+      <button class="btn" id="resetBtn" type="button" data-for="running paused">Zurücksetzen</button>
+      <button class="btn primary" id="againBtn" type="button" data-for="finished">Nochmal</button>
+      <button class="btn" id="doneBtn" type="button" data-for="finished">Fertig</button>
+    </div>
+
+    <p class="hint" id="hint" hidden></p>
+  </section>
+</main>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
