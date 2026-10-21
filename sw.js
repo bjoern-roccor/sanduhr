@@ -3,7 +3,7 @@
 // Änderungen sind deshalb nach dem zweiten Start sichtbar. Bei neuen/entfernten Dateien
 // die Versionsnummer in CACHE erhöhen.
 
-const CACHE = 'sanduhr-v1';
+const CACHE = 'sanduhr-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -15,6 +15,7 @@ const ASSETS = [
   './js/hourglass.js',
   './js/audio.js',
   './js/wakelock.js',
+  './js/theme.js',
   './icons/icon.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -22,7 +23,7 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {

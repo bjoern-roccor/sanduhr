@@ -2,6 +2,7 @@ import { Timer, clampSeconds, splitSeconds, formatClock } from './timer.js';
 import { Hourglass } from './hourglass.js';
 import { unlockAudio, startAlarm, stopAlarm } from './audio.js';
 import { acquireWakeLock, releaseWakeLock, onWakeLockChange } from './wakelock.js';
+import { COLORS, loadColor, saveColor, applyTheme, themeVars } from './theme.js';
 
 const $ = (sel) => document.querySelector(sel);
 const STORAGE_KEY = 'sanduhr.duration';
@@ -18,6 +19,7 @@ const pauseBtn = $('#pauseBtn');
 
 let duration = loadDuration();
 let wakeStatus = 'off';
+let starting = false; // Sanduhr wird gerade umgedreht, die Zeit läuft noch nicht
 
 // ---------- Dauer ----------
 function loadDuration() {
@@ -97,6 +99,7 @@ for (const s of PRESETS) {
 function setState(state) {
   document.body.dataset.state = state;
   pauseBtn.textContent = state === 'paused' ? 'Weiter' : 'Pause';
+  pauseBtn.disabled = starting;
   status.textContent = { running: '', paused: 'Pausiert', finished: 'Zeit abgelaufen' }[state] ?? '';
   hourglass.setPaused(state === 'paused');
   hourglass.invalidate();
@@ -107,8 +110,15 @@ function start() {
   unlockAudio(); // Browser erlauben Ton nur nach einer Nutzergeste
   acquireWakeLock();
   shown = '';
-  timer.start(duration);
+  readout.textContent = formatClock(duration * 1000);
+  starting = true;
   setState('running');
+  // Die Sanduhr wird umgedreht. Erst wenn der Sand zur Ruhe kommt, beginnt die Zeit zu laufen.
+  hourglass.flip(() => {
+    starting = false;
+    pauseBtn.disabled = false;
+    timer.start(duration);
+  });
 }
 
 function togglePause() {
@@ -123,9 +133,12 @@ function togglePause() {
 
 function reset() {
   stopAlarm();
+  starting = false;
+  hourglass.cancelFlip();
   timer.reset();
   releaseWakeLock();
   setState('idle');
+  hourglass.settle(); // Restsand läuft durch, bis alles unten liegt
   renderSetup();
 }
 
@@ -145,7 +158,7 @@ $('#againBtn').addEventListener('click', () => {
 // Antippen der Sanduhr: Pause/Weiter bzw. Alarm beenden
 $('#stage').addEventListener('click', () => {
   if (timer.state === 'finished') reset();
-  else togglePause();
+  else if (!starting) togglePause();
 });
 
 // ---------- Hinweis zum Wachhalten ----------
@@ -181,7 +194,9 @@ function frame(now) {
   tick();
   const state = timer.state;
   const flowing = state === 'running';
-  if (flowing || hourglass.busy) hourglass.draw(now, timer.progress, flowing);
+  // Vor dem Start liegt der Sand ganz unten (Fortschritt 1); beim Umdrehen beginnt er oben (0)
+  const progress = starting ? 0 : state === 'idle' ? 1 : timer.progress;
+  if (flowing || hourglass.busy) hourglass.draw(now, progress, flowing);
   if (state !== 'idle') {
     const text = formatClock(state === 'finished' ? 0 : timer.remainingMs);
     if (text !== shown) {
@@ -199,10 +214,59 @@ document.addEventListener('visibilitychange', () => {
   hourglass.invalidate();
 });
 
+// ---------- Menü: Hintergrundfarbe ----------
+const menu = $('#menu');
+const menuBtn = $('#menuBtn');
+const backdrop = $('#menuBackdrop');
+let bgColor = loadColor();
+
+function setMenu(open) {
+  menu.hidden = backdrop.hidden = !open;
+  menuBtn.setAttribute('aria-expanded', String(open));
+  if (open) menu.querySelector('.swatch[aria-checked="true"]')?.focus();
+  else menuBtn.focus({ preventScroll: true });
+}
+
+function setColor(hex) {
+  bgColor = hex;
+  hourglass.setLight(applyTheme(hex));
+  saveColor(hex);
+  for (const sw of document.querySelectorAll('.swatch')) {
+    const on = sw.dataset.hex === hex;
+    sw.setAttribute('aria-checked', String(on));
+    sw.tabIndex = on ? 0 : -1;
+  }
+  $('#colorName').textContent = COLORS.find((c) => c.hex === hex)?.name ?? '';
+}
+
+for (const c of COLORS) {
+  const sw = document.createElement('button');
+  sw.type = 'button';
+  sw.className = 'swatch';
+  sw.dataset.hex = c.hex;
+  sw.style.setProperty('--sw', c.hex);
+  sw.style.setProperty('--check', themeVars(c.hex).light ? '#1b1208' : '#fff');
+  sw.setAttribute('role', 'radio');
+  sw.setAttribute('aria-label', c.name);
+  sw.title = c.name;
+  sw.addEventListener('click', () => setColor(c.hex));
+  $('#swatches').append(sw);
+}
+menuBtn.addEventListener('click', () => setMenu(menu.hidden));
+$('#menuClose').addEventListener('click', () => setMenu(false));
+backdrop.addEventListener('click', () => setMenu(false));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !menu.hidden) setMenu(false); });
+
+setColor(bgColor);
 renderSetup();
 setState('idle');
 requestAnimationFrame(frame);
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  const hadController = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.register('./sw.js').catch(() => { /* Offline-Betrieb optional */ });
+  // Neue Version aktiv geworden: im Ruhezustand sofort neu laden, damit die Änderungen sichtbar sind
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && timer.state === 'idle' && !starting) location.reload();
+  });
 }

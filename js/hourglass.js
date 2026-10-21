@@ -1,18 +1,39 @@
 // Zeichnet die Sanduhr (Holzrahmen, Glas, Sand, Rieselstrahl) auf ein Canvas.
 // Alle Maße stammen aus geometry.js (Einheitskoordinaten, Skalierung per Transform).
+//
+// Ausrichtung: Das Glas dreht sich um den Winkel theta. base = 0 ist aufrecht, base = 1 steht
+// auf dem Kopf (nach jedem Start wechselt base). Pausiert liegt die Sanduhr (theta = π/2).
+// Der Sand wird immer relativ zur Schwerkraft berechnet. Für theta > π/2 wird das Glas an
+// seiner Querachse gespiegelt (es ist symmetrisch), damit geometry.js nur 0…π/2 braucht.
 
 import { R, WALL, radius, outline, sandState, toLocal } from './geometry.js';
 
+const PI = Math.PI;
 const HALF_W = 0.88; // halbe Breite der Holzplatten
 const HALF_H = 1.14; // halbe Gesamthöhe inkl. Platten
-const ROT_TIME = 0.95; // Sekunden für das Hinlegen/Aufrichten
 const POST_X = 0.745;
+const SAND_LAG = 5; // 1/s: Der Sand folgt der Schwerkraftrichtung zähflüssig
+const SETTLE_RATE = 0.9; // Fortschritt pro Sekunde, wenn der Rest beim Zurücksetzen ausläuft
+const GRAVITY = 2.4; // Fallbeschleunigung der Sandkörner im Strahl (Einheiten/s²)
+const JERKY_BELOW = 0.03; // ab dieser Ablaufgeschwindigkeit (Fortschritt/s) ruckelt der Sand nicht mehr
+
+const BRIGHT = [168, 118, 63];
+const MID = [107, 67, 34];
+const DARK = [61, 36, 17];
 
 const hash = (n) => {
   const x = Math.sin(n * 127.1 + 311.7) * 43758.5453;
   return x - Math.floor(x);
 };
+const vnoise = (x) => {
+  const i = Math.floor(x);
+  const f = x - i;
+  const u = f * f * (3 - 2 * f);
+  return hash(i) * (1 - u) + hash(i + 1) * u;
+};
 const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
+const mixv = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+const rgb = (c, a = 1) => `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},${a})`;
 
 function polyPath(points) {
   const p = new Path2D();
@@ -37,15 +58,40 @@ export class Hourglass {
     this.ctx = canvas.getContext('2d');
     this.glassPath = polyPath(outline(0));
     this.innerPath = polyPath(outline(WALL));
-    this.rotT = 0; // 0 aufrecht … 1 liegend (linear, wird eased)
-    this.target = 0;
-    this.flow = 0; // Deckkraft des Rieselstrahls
+
+    // Ausrichtung
+    this.base = 0; // 0 aufrecht, 1 umgedreht
+    this.theta = 0; // aktueller Drehwinkel des Glases (0…π)
+    this.paused = false;
+    this.anim = null; // { from, to, t, dur }
+    this.sandTheta = 0; // Schwerkraftrichtung im Glas, folgt theta mit Verzögerung
+    this.flipPending = false;
+    this.flipCb = null;
+
+    // Sand
+    this.pTrue = 1; // echter Fortschritt (1 = Sand ganz unten, so steht die Uhr vor dem Start)
+    this.pv = 1; // angezeigter Fortschritt (ruckelt beim Nachrutschen)
+    this.rate = 0; // Ablaufgeschwindigkeit (Fortschritt/s)
+    this.slip = null; // laufender Rutsch { from, to, t, dur }
+    this.threshold = 0.004;
+    this.settling = false;
+
+    // Rieselstrahl
+    this.flow = 0;
     this.flowTarget = 0;
+    this.stream = [];
+    this.splash = [];
+    this.spawnAcc = 0;
+
+    this.clock = 0;
     this.last = null;
     this.dirty = true;
+    this.light = false;
+    this.lt = 0; // 0 … 1: Licht von oben im Weltraum, folgt der Drehung des Rahmens
     this.W = 0;
     this.H = 0;
     this.S = 1;
+    this.Se = 1;
     this.dpr = 1;
     this.grain = this.#makeGrain();
     this.resize();
@@ -56,7 +102,38 @@ export class Hourglass {
 
   /** true = Sanduhr liegt auf der Seite (Pause) */
   setPaused(paused) {
-    this.target = paused ? 1 : 0;
+    if (this.paused === paused) return;
+    this.paused = paused;
+    this.#retarget();
+  }
+
+  /** Helle Hintergrundfarbe: Glas bekommt dunklere Ränder */
+  setLight(light) {
+    this.light = light;
+    this.invalidate();
+  }
+
+  /** Dreht die Sanduhr um. Wenn sie ruhig steht, wird cb aufgerufen (dann soll der Sand laufen). */
+  flip(cb) {
+    this.settling = false;
+    this.base ^= 1;
+    this.pTrue = this.pv = 0; // der Sand ist jetzt oben, der Fortschritt beginnt neu
+    this.slip = null;
+    this.stream.length = 0;
+    this.splash.length = 0;
+    this.flipCb = cb;
+    this.flipPending = true;
+    this.#retarget();
+  }
+
+  cancelFlip() {
+    this.flipCb = null;
+    this.flipPending = false;
+  }
+
+  /** Zurücksetzen: Der Restsand läuft schnell durch, bis er ganz unten liegt. */
+  settle() {
+    if (this.pTrue < 1) this.settling = true;
     this.invalidate();
   }
 
@@ -64,11 +141,17 @@ export class Hourglass {
     this.dirty = true;
   }
 
-  /** true, solange noch etwas animiert (Drehung, Ein-/Ausblenden des Strahls) oder neu gezeichnet werden muss */
+  /** true, solange noch etwas animiert wird oder neu gezeichnet werden muss */
   get busy() {
     return this.dirty
-      || Math.abs(this.rotT - this.target) > 1e-4
-      || Math.abs(this.flow - this.flowTarget) > 0.004;
+      || this.anim !== null
+      || this.flipPending
+      || this.settling
+      || this.slip !== null
+      || Math.abs(this.sandTheta - this.theta) > 0.002
+      || Math.abs(this.flow - this.flowTarget) > 0.004
+      || this.stream.length > 0
+      || this.splash.length > 0;
   }
 
   resize() {
@@ -79,9 +162,18 @@ export class Hourglass {
     this.H = Math.max(1, rect.height);
     this.canvas.width = Math.round(this.W * this.dpr);
     this.canvas.height = Math.round(this.H * this.dpr);
-    // liegend ist die Sanduhr 2·HALF_H breit, beim Kippen schwenkt die Diagonale aus
     this.S = Math.min(this.W / (2 * HALF_H + 0.16), this.H / 2.95);
-    this.sandGradient = null;
+    this.invalidate();
+  }
+
+  #retarget() {
+    const target = this.paused ? PI / 2 : this.base * PI;
+    const d = Math.abs(target - this.theta);
+    if (d < 1e-6) {
+      this.anim = null;
+    } else {
+      this.anim = { from: this.theta, to: target, t: 0, dur: 0.55 + (0.4 * d) / (PI / 2) };
+    }
     this.invalidate();
   }
 
@@ -106,58 +198,119 @@ export class Hourglass {
 
   /**
    * @param {number} now Zeit in ms (requestAnimationFrame)
-   * @param {number} progress 0 (oben voll) … 1 (unten voll)
-   * @param {boolean} flowing true, wenn Sand rieselt
+   * @param {number} progress 0 (Sand in der oberen Hälfte) … 1 (ganz unten)
+   * @param {boolean} flowing true, wenn die Zeit läuft
    */
   draw(now, progress, flowing) {
-    const dt = this.last == null ? 0 : Math.min(0.1, (now - this.last) / 1000);
+    const dt = this.last == null ? 0 : Math.min(0.05, (now - this.last) / 1000);
     this.last = now;
     this.dirty = false;
+    this.clock += dt;
 
-    // Drehung
-    const step = dt / ROT_TIME;
-    if (this.rotT < this.target) this.rotT = Math.min(this.target, this.rotT + step);
-    else if (this.rotT > this.target) this.rotT = Math.max(this.target, this.rotT - step);
-    const e = easeInOut(this.rotT);
-    const phi = e * Math.PI / 2;
+    // Drehung des Glases
+    if (this.anim) {
+      const a = this.anim;
+      a.t += dt / a.dur;
+      const u = Math.min(1, a.t);
+      this.theta = a.from + (a.to - a.from) * easeInOut(u);
+      if (u >= 1) {
+        this.theta = a.to;
+        this.anim = null;
+      }
+    }
+    // Der Sand folgt der Schwerkraft mit Verzögerung (zähflüssig)
+    this.sandTheta += (this.theta - this.sandTheta) * (1 - Math.exp(-dt * SAND_LAG));
+    if (Math.abs(this.sandTheta - this.theta) < 0.002) this.sandTheta = this.theta;
+    const calm = !this.anim && Math.abs(this.sandTheta - this.theta) < 0.04;
+
+    if (this.flipPending && calm) {
+      this.flipPending = false;
+      const cb = this.flipCb;
+      this.flipCb = null;
+      cb?.();
+    }
+
+    // Fortschritt
+    const canFlow = calm && !this.paused;
+    if (this.settling) {
+      if (canFlow) this.pTrue = Math.min(1, this.pTrue + SETTLE_RATE * dt);
+      if (this.pTrue >= 1) this.settling = false;
+    } else {
+      if (dt > 0) {
+        const speed = Math.max(0, progress - this.pTrue) / dt;
+        this.rate += (speed - this.rate) * (1 - Math.exp(-dt * 2));
+      }
+      this.pTrue = progress;
+    }
+    const running = (flowing || this.settling) && canFlow && this.pTrue < 1;
+
+    // Ruckartiges Nachrutschen: Der Sand bleibt kurz haften und rutscht dann ein Stück nach
+    let surge = 0;
+    if (!running || this.settling || this.rate > JERKY_BELOW) {
+      this.slip = null;
+      this.pv = this.pTrue;
+    } else if (this.slip) {
+      const s = this.slip;
+      s.t += dt / s.dur;
+      const u = Math.min(1, s.t);
+      this.pv = s.from + (s.to - s.from) * (1 - (1 - u) ** 2);
+      surge = Math.sin(PI * u);
+      if (u >= 1) this.slip = null;
+    } else if (this.pTrue - this.pv > this.threshold || (this.pTrue >= 1 && this.pTrue > this.pv)) {
+      this.slip = { from: this.pv, to: this.pTrue, t: 0, dur: 0.2 + Math.random() * 0.25 };
+      this.threshold = 0.0025 + Math.random() * 0.006;
+    }
 
     // Rieselstrahl ein-/ausblenden
-    this.flowTarget = flowing && progress < 1 && this.target === 0 ? 1 : 0;
+    this.flowTarget = running ? 1 : 0;
     const k = 1 - Math.exp(-dt * (this.flowTarget ? 10 : 18));
     this.flow += (this.flowTarget - this.flow) * k;
     if (Math.abs(this.flow - this.flowTarget) < 0.004) this.flow = this.flowTarget;
+    if (this.flow < 0.01) {
+      this.stream.length = 0;
+      this.splash.length = 0;
+    }
 
+    // Lage der Sanduhr im Bild: Sie steht immer auf dem Boden, wird beim Drehen bei Bedarf kleiner
     const { ctx, W, H, S, dpr } = this;
+    const c = Math.cos(this.theta);
+    const s = Math.sin(this.theta);
+    const extW = 2 * (HALF_W * Math.abs(c) + HALF_H * Math.abs(s));
+    const extH = 2 * (HALF_W * Math.abs(s) + HALF_H * Math.abs(c));
+    const ground = Math.min(H - 0.1 * S, H / 2 + 1.3 * S);
+    const sc = Math.min(1, (W - 8) / (extW * S), (ground - 6) / (extH * S));
+    const Se = S * sc;
+    this.Se = Se;
+    this.lt = (1 - c) / 2;
+
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
+    this.#drawShadow(W / 2, ground, Math.abs(s), Se);
 
-    // Die Sanduhr steht immer auf dem Boden: tiefster Punkt des gedrehten Rahmens
-    const bottomExt = HALF_W * Math.sin(phi) + HALF_H * Math.cos(phi);
-    const ground = Math.min(H - 0.1 * S, H / 2 + 1.3 * S);
-    const cx = W / 2;
-    const cy = ground - bottomExt * S;
-
-    this.#drawShadow(cx, ground, e);
+    const mirror = this.sandTheta > PI / 2;
+    const fb = this.base === 0 ? this.pv : 1 - this.pv; // Anteil des Sandes in der unteren Glashälfte
+    const phiS = mirror ? PI - this.sandTheta : this.sandTheta;
+    const st = sandState(mirror ? 1 - fb : fb, phiS);
 
     ctx.save();
-    ctx.translate(cx, cy);
-    ctx.scale(S, S);
-    ctx.rotate(phi);
+    ctx.translate(W / 2, ground - (extH / 2) * Se);
+    ctx.scale(Se, Se);
+    ctx.rotate(this.theta);
     this.#drawPosts();
     this.#drawGlassBack();
-    this.#drawSand(progress, phi, now / 1000);
+    this.#drawSand(st, phiS, mirror, surge, dt);
     this.#drawGlassFront();
     this.#drawPlates();
     ctx.restore();
   }
 
-  #drawShadow(cx, ground, e) {
-    const { ctx, S } = this;
-    const rx = (0.95 + 0.3 * e) * S;
-    const ry = 0.09 * S;
-    const lift = 1 - 0.35 * Math.sin(Math.PI * e); // beim Kippen kurz leichter
+  #drawShadow(cx, ground, lying, Se) {
+    const { ctx } = this;
+    const rx = (0.95 + 0.3 * lying) * Se;
+    const ry = 0.09 * Se;
+    const lift = 1 - 0.35 * Math.sin(PI * lying);
     ctx.save();
-    ctx.translate(cx, ground + 0.01 * S);
+    ctx.translate(cx, ground + 0.01 * Se);
     ctx.scale(1, ry / rx);
     const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
     g.addColorStop(0, `rgba(0,0,0,${0.55 * lift})`);
@@ -165,21 +318,21 @@ export class Hourglass {
     g.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.arc(0, 0, rx, 0, Math.PI * 2);
+    ctx.arc(0, 0, rx, 0, PI * 2);
     ctx.fill();
     ctx.restore();
   }
 
   #drawPosts() {
-    const { ctx } = this;
+    const { ctx, lt } = this;
     const w = 0.075;
     for (const sx of [-1, 1]) {
       const x = sx * POST_X - w / 2;
       const g = ctx.createLinearGradient(x, 0, x + w, 0);
       g.addColorStop(0, '#2b170a');
-      g.addColorStop(0.3, '#8c5c30');
+      g.addColorStop(0.28, rgb(mixv([140, 92, 48], [100, 64, 31], lt)));
       g.addColorStop(0.5, '#a8743e');
-      g.addColorStop(0.78, '#64401f');
+      g.addColorStop(0.72, rgb(mixv([100, 64, 31], [140, 92, 48], lt)));
       g.addColorStop(1, '#25130a');
       ctx.fillStyle = g;
       ctx.fillRect(x, -1.02, w, 2.04);
@@ -198,36 +351,42 @@ export class Hourglass {
   }
 
   #drawGlassBack() {
-    const { ctx } = this;
+    const { ctx, light } = this;
     const g = ctx.createLinearGradient(-R, 0, R, 0);
-    g.addColorStop(0, 'rgba(150,200,255,0.16)');
-    g.addColorStop(0.4, 'rgba(210,235,255,0.05)');
-    g.addColorStop(0.7, 'rgba(160,205,255,0.07)');
-    g.addColorStop(1, 'rgba(150,200,255,0.18)');
+    if (light) {
+      g.addColorStop(0, 'rgba(110,150,200,0.22)');
+      g.addColorStop(0.35, 'rgba(255,255,255,0.3)');
+      g.addColorStop(0.65, 'rgba(255,255,255,0.3)');
+      g.addColorStop(1, 'rgba(110,150,200,0.22)');
+    } else {
+      g.addColorStop(0, 'rgba(150,200,255,0.17)');
+      g.addColorStop(0.4, 'rgba(210,235,255,0.05)');
+      g.addColorStop(0.6, 'rgba(210,235,255,0.05)');
+      g.addColorStop(1, 'rgba(150,200,255,0.17)');
+    }
     ctx.fillStyle = g;
     ctx.fill(this.glassPath);
   }
 
   #sandFill() {
-    if (!this.sandGradient) {
-      const g = this.ctx.createLinearGradient(-R, 0, R, 0);
-      g.addColorStop(0, '#8a6326');
-      g.addColorStop(0.22, '#d6ae60');
-      g.addColorStop(0.45, '#ecc983');
-      g.addColorStop(0.7, '#cfa452');
-      g.addColorStop(1, '#7d5a22');
-      this.sandGradient = g;
-    }
-    return this.sandGradient;
+    const t = this.lt;
+    const g = this.ctx.createLinearGradient(-R, 0, R, 0);
+    g.addColorStop(0, '#85602a');
+    g.addColorStop(0.25, rgb(mixv([214, 174, 96], [207, 164, 82], t)));
+    g.addColorStop(0.5, '#ecc983');
+    g.addColorStop(0.75, rgb(mixv([207, 164, 82], [214, 174, 96], t)));
+    g.addColorStop(1, '#85602a');
+    return g;
   }
 
   /** Oberfläche eines Sandhaufens als Punktliste in Glaskoordinaten */
-  #surface(b, phi, seed) {
+  #surface(b, phi, seed, agit) {
     const sn = Math.sin(phi);
     const cs = Math.cos(phi);
     const pts = [];
     const add = (u, v) => pts.push([u * cs + v * sn, -u * sn + v * cs]);
-    const jitter = (i) => (hash(i * 3.17 + seed) - 0.5) * 0.007;
+    const amp = 0.007 * (1 + 3.5 * agit);
+    const jitter = (i) => (hash(i * 3.17 + seed + Math.floor(this.clock * 14 * agit)) - 0.5) * amp;
     if (b.finite) {
       const base = b.L + 0.6;
       add(b.uc - b.w, base);
@@ -254,9 +413,9 @@ export class Hourglass {
     return { pts, surfaceFrom: 1, surfaceTo: n + 1 };
   }
 
-  #drawBulbSand(b, phi, clipTop, seed) {
+  #drawBulbSand(b, phi, clipTop, seed, agit) {
     const { ctx } = this;
-    const { pts, surfaceFrom, surfaceTo } = this.#surface(b, phi, seed);
+    const { pts, surfaceFrom, surfaceTo } = this.#surface(b, phi, seed, agit);
     ctx.save();
     ctx.beginPath();
     if (clipTop) ctx.rect(-1.5, -1.5, 3, 1.515);
@@ -270,7 +429,7 @@ export class Hourglass {
     ctx.fill();
 
     // Körnung
-    this.grain.setTransform(new DOMMatrix().scale(0.75 / this.S));
+    this.grain.setTransform(new DOMMatrix().scale(0.75 / this.Se));
     ctx.globalAlpha = 0.7;
     ctx.fillStyle = this.grain;
     ctx.fill();
@@ -290,71 +449,119 @@ export class Hourglass {
     ctx.restore();
   }
 
-  #drawSand(progress, phi, t) {
+  #drawSand(st, phi, mirror, surge, dt) {
     const { ctx } = this;
-    const st = sandState(progress, phi);
     ctx.save();
     ctx.clip(this.innerPath);
-    if (st.top) this.#drawBulbSand(st.top, phi, true, 1);
-    if (st.bottom) this.#drawBulbSand(st.bottom, phi, false, 7);
+    ctx.save();
+    if (mirror) ctx.scale(1, -1); // gespiegeltes Glas: oben ist die Quelle, unten die Mulde
+    if (st.top) this.#drawBulbSand(st.top, phi, true, 1, surge);
+    if (st.bottom) this.#drawBulbSand(st.bottom, phi, false, 7, surge);
 
     // weiche Schattierung zum Glasrand hin
     const shade = ctx.createLinearGradient(-R, 0, R, 0);
-    shade.addColorStop(0, 'rgba(20,10,0,0.28)');
+    shade.addColorStop(0, 'rgba(20,10,0,0.29)');
     shade.addColorStop(0.18, 'rgba(20,10,0,0)');
-    shade.addColorStop(0.8, 'rgba(20,10,0,0)');
-    shade.addColorStop(1, 'rgba(20,10,0,0.3)');
+    shade.addColorStop(0.82, 'rgba(20,10,0,0)');
+    shade.addColorStop(1, 'rgba(20,10,0,0.29)');
     ctx.globalCompositeOperation = 'source-atop';
     ctx.fillStyle = shade;
     ctx.fillRect(-R, -1, 2 * R, 2);
     ctx.globalCompositeOperation = 'source-over';
 
-    if (this.flow > 0.004 && st.bottom) this.#drawStream(st.bottom, phi, t);
+    if (this.flow > 0.004) this.#drawStream(st.bottom, phi, surge, dt);
+    ctx.restore();
     ctx.restore();
   }
 
-  #drawStream(b, phi, t) {
+  /** Strahl aus einzelnen Körnern: Sand reißt ab, klumpt und fällt beschleunigt */
+  #drawStream(b, phi, surge, dt) {
     const { ctx } = this;
-    const apex = toLocal(b.uc, b.L + b.amp, phi);
+    const apex = b ? toLocal(b.uc, b.L + b.amp, phi) : { x: 0, y: 0.98 };
+    const apexY = Math.min(0.99, apex.y);
     const y0 = -0.03;
-    const y1 = apex.y + 0.012;
-    const len = y1 - y0;
-    if (len <= 0.01) return;
-    ctx.save();
-    ctx.globalAlpha = this.flow;
+    const n1 = vnoise(this.clock * 2.1);
+    const n2 = vnoise(this.clock * 5.3 + 10);
+    const gap = n1 < 0.2; // kurz dünner Strahl, einzelne Körner lösen sich
+    const flux = Math.min(1.5, 0.7 + 0.45 * n1 + 0.2 * n2 + 0.55 * surge);
 
-    const w = 0.014;
-    const sg = ctx.createLinearGradient(-w, 0, w, 0);
-    sg.addColorStop(0, 'rgba(190,150,70,0.0)');
-    sg.addColorStop(0.5, 'rgba(236,205,130,0.95)');
-    sg.addColorStop(1, 'rgba(190,150,70,0.0)');
-    ctx.fillStyle = sg;
-    ctx.fillRect(-w, y0, 2 * w, len);
-
-    // bewegte Körner
-    const count = 46;
-    const speed = 1.6;
-    for (let i = 0; i < count; i++) {
-      const f = (i / count + (t * speed) / len * 0.35) % 1;
-      const y = y0 + f * len;
-      const spread = 0.004 + 0.006 * f;
-      const x = (hash(i * 5.3) - 0.5) * 2 * spread;
-      ctx.fillStyle = hash(i * 1.9) > 0.5 ? 'rgba(250,228,165,0.95)' : 'rgba(200,160,80,0.9)';
-      ctx.beginPath();
-      ctx.arc(x, y, 0.0042 + hash(i * 2.2) * 0.0025, 0, Math.PI * 2);
-      ctx.fill();
+    // neue Körner
+    this.spawnAcc += (gap ? 18 : 95 * flux) * dt;
+    while (this.spawnAcc >= 1) {
+      this.spawnAcc -= 1;
+      this.stream.push({
+        x: (Math.random() - 0.5) * 0.008,
+        y: y0,
+        v: 0.2 + Math.random() * 0.12,
+        r: 0.0032 + Math.random() * 0.0028,
+        c: Math.random() > 0.5,
+      });
+    }
+    // Körner fallen und schlagen auf dem Kegel auf
+    for (let i = this.stream.length - 1; i >= 0; i--) {
+      const p = this.stream[i];
+      p.v += GRAVITY * dt;
+      p.y += p.v * dt;
+      if (p.y >= apexY) {
+        this.stream.splice(i, 1);
+        if (Math.random() < 0.4) {
+          this.splash.push({
+            x: apex.x + (Math.random() - 0.5) * 0.02,
+            y: apexY,
+            vx: (Math.random() - 0.5) * 0.3,
+            vy: -(0.08 + Math.random() * 0.14),
+            life: 0.25 + Math.random() * 0.2,
+            t: 0,
+          });
+        }
+      }
+    }
+    for (let i = this.splash.length - 1; i >= 0; i--) {
+      const p = this.splash[i];
+      p.t += dt;
+      p.vy += GRAVITY * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (p.t > p.life || p.y > apexY + 0.02) this.splash.splice(i, 1);
     }
 
-    // aufstäubende Körner am Kegel
-    const frame = Math.floor(t * 24);
-    for (let j = 0; j < 9; j++) {
-      const a = hash(j * 9.1 + frame * 0.37);
-      const bnc = hash(j * 4.7 + frame * 1.13);
-      const dx = (a - 0.5) * 0.11;
-      const dy = -bnc * 0.045 * (1 - Math.abs(a - 0.5) * 1.2);
-      ctx.fillStyle = 'rgba(236,205,130,0.75)';
+    ctx.save();
+    ctx.globalAlpha = this.flow;
+    ctx.fillStyle = 'rgba(232,198,120,0.9)';
+    // dünner, sich verdickender Faden mit wandernden Klumpen
+    const top = y0;
+    const len = apexY - top;
+    if (len > 0.02) {
+      const base = gap ? 0.0016 : 0.0034 + 0.0035 * flux;
+      const seg = 28;
+      const left = [];
+      const right = [];
+      for (let i = 0; i <= seg; i++) {
+        const f = i / seg;
+        const y = top + len * f;
+        const w = base * (0.45 + 1.1 * vnoise(y * 26 - this.clock * 6)) * (0.7 + 0.5 * f);
+        left.push([-w, y]);
+        right.push([w, y]);
+      }
+      ctx.globalAlpha = this.flow * (gap ? 0.45 : 0.85);
       ctx.beginPath();
-      ctx.arc(apex.x + dx, apex.y + dy, 0.004, 0, Math.PI * 2);
+      left.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      right.reverse().forEach(([x, y]) => ctx.lineTo(x, y));
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.globalAlpha = this.flow;
+    for (const p of this.stream) {
+      ctx.fillStyle = p.c ? 'rgba(250,228,165,0.95)' : 'rgba(205,165,85,0.95)';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = 'rgba(236,205,130,0.85)';
+    for (const p of this.splash) {
+      ctx.globalAlpha = this.flow * (1 - p.t / p.life);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 0.0038, 0, PI * 2);
       ctx.fill();
     }
     ctx.restore();
@@ -362,6 +569,7 @@ export class Hourglass {
 
   #streak(side, y0, y1, width, alpha) {
     const { ctx } = this;
+    if (alpha < 0.005) return;
     ctx.beginPath();
     const n = 30;
     for (let i = 0; i <= n; i++) {
@@ -377,33 +585,37 @@ export class Hourglass {
   }
 
   #drawGlassFront() {
-    const { ctx } = this;
-    // Glasränder
+    const { ctx, light } = this;
     ctx.lineJoin = 'round';
     ctx.lineWidth = 0.02;
-    ctx.strokeStyle = 'rgba(205,230,255,0.38)';
+    ctx.strokeStyle = light ? 'rgba(60,85,120,0.6)' : 'rgba(205,230,255,0.38)';
     ctx.stroke(this.glassPath);
     ctx.lineWidth = 0.006;
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.strokeStyle = light ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.18)';
     ctx.stroke(this.innerPath);
 
-    // Reflexe
-    this.#streak(-1, -0.92, -0.16, 0.04, 0.3);
-    this.#streak(-1, 0.16, 0.92, 0.04, 0.22);
-    this.#streak(1, -0.8, -0.2, 0.016, 0.14);
-    this.#streak(1, 0.2, 0.8, 0.016, 0.14);
-    this.#streak(-1, -0.97, -0.9, 0.05, 0.12);
+    // Reflexe: Das Licht kommt von links, sie bleiben beim Umdrehen auf derselben Bildseite
+    const a = 1 - this.lt; // 1 aufrecht, 0 umgedreht
+    for (const [y0, y1, w, al] of [[-0.92, -0.16, 0.04, 0.28], [0.16, 0.92, 0.04, 0.28], [-0.97, -0.9, 0.05, 0.12], [0.9, 0.97, 0.05, 0.12]]) {
+      this.#streak(-1, y0, y1, w, al * a);
+      this.#streak(1, y0, y1, w, al * (1 - a));
+    }
+    for (const [y0, y1] of [[-0.8, -0.2], [0.2, 0.8]]) {
+      this.#streak(1, y0, y1, 0.016, 0.14 * a);
+      this.#streak(-1, y0, y1, 0.016, 0.14 * (1 - a));
+    }
   }
 
   #drawPlates() {
-    const { ctx } = this;
+    const { ctx, lt } = this;
     for (const top of [true, false]) {
       const y = top ? -1.14 : 1.0;
       const h = 0.14;
+      // Beide Platten sind gleich und von oben beleuchtet; beim Umdrehen wechselt der Verlauf
       const g = ctx.createLinearGradient(0, y, 0, y + h);
-      g.addColorStop(0, top ? '#a8763f' : '#8e5f30');
-      g.addColorStop(0.5, '#6b4322');
-      g.addColorStop(1, top ? '#3d2411' : '#4d2f17');
+      g.addColorStop(0, rgb(mixv(BRIGHT, DARK, lt)));
+      g.addColorStop(0.5, rgb(MID));
+      g.addColorStop(1, rgb(mixv(DARK, BRIGHT, lt)));
       ctx.fillStyle = g;
       roundRect(ctx, -HALF_W, y, 2 * HALF_W, h, 0.035);
       ctx.fill();
@@ -411,20 +623,21 @@ export class Hourglass {
       ctx.strokeStyle = 'rgba(40,20,8,0.22)';
       ctx.lineWidth = 0.004;
       for (let i = 0; i < 6; i++) {
-        const gy = y + 0.02 + hash(i * 3 + (top ? 1 : 2)) * (h - 0.04);
+        const gy = y + 0.02 + hash(i * 3 + 1) * (h - 0.04);
         ctx.beginPath();
         ctx.moveTo(-HALF_W + 0.04, gy);
         ctx.lineTo(HALF_W - 0.04, gy + (hash(i) - 0.5) * 0.01);
         ctx.stroke();
       }
-      // Glanzkante
-      ctx.strokeStyle = 'rgba(255,220,160,0.4)';
+      // Glanzkante an der oberen Weltkante
       ctx.lineWidth = 0.006;
-      ctx.beginPath();
-      const ey = top ? y + 0.008 : y + 0.008;
-      ctx.moveTo(-HALF_W + 0.04, ey);
-      ctx.lineTo(HALF_W - 0.04, ey);
-      ctx.stroke();
+      for (const [ey, al] of [[y + 0.008, 1 - lt], [y + h - 0.008, lt]]) {
+        ctx.strokeStyle = `rgba(255,220,160,${0.4 * al})`;
+        ctx.beginPath();
+        ctx.moveTo(-HALF_W + 0.04, ey);
+        ctx.lineTo(HALF_W - 0.04, ey);
+        ctx.stroke();
+      }
       // Messingring am Glas
       const ry = top ? y + h : y - 0.03;
       const bg = ctx.createLinearGradient(0, ry, 0, ry + 0.03);

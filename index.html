@@ -11,8 +11,27 @@
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="stylesheet" href="css/style.css">
+<script>
+  // Gespeicherte Hintergrundfarbe sofort setzen, damit beim Start nichts aufblitzt
+  try {
+    var c = localStorage.getItem('sanduhr.bg');
+    if (/^#[0-9a-f]{6}$/i.test(c)) document.documentElement.style.setProperty('--bg', c);
+  } catch (e) { /* ignorieren */ }
+</script>
 </head>
 <body data-state="idle">
+<button class="menu-btn" id="menuBtn" type="button" aria-label="Menü" aria-haspopup="dialog" aria-expanded="false" aria-controls="menu">
+  <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+</button>
+<div class="menu-backdrop" id="menuBackdrop" hidden></div>
+<div class="menu" id="menu" role="dialog" aria-label="Menü" hidden>
+  <div class="menu-head">
+    <h2>Hintergrundfarbe</h2>
+    <button class="menu-close" id="menuClose" type="button" aria-label="Menü schließen">✕</button>
+  </div>
+  <div class="swatches" id="swatches" role="radiogroup" aria-label="Hintergrundfarbe"></div>
+  <p class="menu-current" id="colorName"></p>
+</div>
 <main class="app">
   <section class="stage" id="stage">
     <canvas id="glass" role="img" aria-label="Sanduhr"></canvas>

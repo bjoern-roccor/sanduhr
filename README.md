@@ -3,10 +3,13 @@
 Sanduhr als Progressive Web App (PWA) für das Android-Handy.
 
 - Zeit in Minuten und Sekunden einstellen (1 Sekunde bis 30:00), dazu Schnellwahl
-- Realistisch gezeichnete Sanduhr: Glas, Holzrahmen, Sandtrichter, Schüttkegel, rieselnder Strahl
+- Realistisch gezeichnete Sanduhr: Glas, Holzrahmen, Sandtrichter, Schüttkegel, rieselnder Strahl aus einzelnen Körnern
+- Vor dem Start liegt der gesamte Sand unten. **Start** dreht die Sanduhr um, erst wenn der Sand zur Ruhe kommt, läuft die Zeit
+- Der Sand ist zäh: Er rutscht ruckartig nach (bei langen Zeiten deutlich sichtbar), der Strahl klumpt und reißt kurz ab, und beim Kippen folgt die Sandoberfläche der Schwerkraft mit Verzögerung
 - **Pause**: Die Sanduhr legt sich auf die Seite, der Sand liegt waagerecht, die Zeit steht. Mit **Weiter** richtet sie sich wieder auf (auch durch Antippen der Sanduhr)
 - **Signal** bei Ablauf: Glockenton (per Web Audio erzeugt) und Vibration
 - **Bildschirm bleibt an**, ohne Dimmen, solange die App läuft oder pausiert (Screen Wake Lock)
+- **Menü** (oben rechts): 20 Hintergrundfarben zur Auswahl; Schrift und Bedienelemente passen sich automatisch an, die Wahl wird gespeichert
 - Installierbar und offline nutzbar
 
 Keine Abhängigkeiten, kein Build-Schritt: reines HTML, CSS und JavaScript.
@@ -51,6 +54,7 @@ ist deshalb nach dem zweiten Start sichtbar. Werden Dateien hinzugefügt oder en
 | `js/hourglass.js` | Canvas-Zeichnung, Hinlegen/Aufrichten |
 | `js/audio.js` | Alarmton und Vibration |
 | `js/wakelock.js` | Bildschirm wachhalten, nach Rückkehr in die App neu anfordern |
+| `js/theme.js` | Die 20 Hintergrundfarben und die davon abgeleiteten Farben |
 | `sw.js`, `manifest.webmanifest` | PWA |
 
 ## Grenzen
@@ -58,4 +62,5 @@ ist deshalb nach dem zweiten Start sichtbar. Werden Dateien hinzugefügt oder en
 - Der Bildschirm bleibt nur an, solange die App im Vordergrund ist. Wechselt man in eine andere App
   oder sperrt das Handy von Hand, gibt Android den Wake Lock frei, und der Alarm kann unterdrückt werden.
 - Im Energiesparmodus kann Android den Wake Lock ablehnen. Die App zeigt dann einen Hinweis.
+- Setzt man mitten im Lauf zurück, läuft der Restsand zügig durch, bis alles unten liegt.
 - Der Alarm klingt höchstens 60 Sekunden und wird mit *Nochmal*, *Fertig* oder Antippen der Sanduhr beendet.
